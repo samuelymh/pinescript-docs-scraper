@@ -14,3 +14,15 @@ colorama~=0.4
 # Optional dependencies for enhanced functionality
 tqdm~=4.65.0  # Progress bars
 pydantic>=2.10  # Data validation
+
+# RAG server dependencies
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+supabase>=2.0.0
+openai>=1.3.0
+tiktoken>=0.5.0
+tenacity>=8.2.0
+python-jose[cryptography]>=3.3.0
+slowapi>=0.1.9
+pytest>=7.4.0
+httpx>=0.25.0  # for FastAPI TestClient
