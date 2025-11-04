@@ -56,9 +56,8 @@ class TestHealthEndpoint:
         assert "documents_count" in indexing
         assert "last_index_time" in indexing
         
-        # These should be None in Step 1 (not yet implemented)
-        assert indexing["documents_count"] is None
-        assert indexing["last_index_time"] is None
+        # Note: These may be None if Supabase is not configured or no documents indexed yet
+        # Step 2 implementation queries actual stats from Supabase
 
 
 class TestChatEndpoint:

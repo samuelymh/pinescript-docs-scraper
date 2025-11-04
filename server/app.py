@@ -14,6 +14,8 @@ from server.config import get_config
 from server.models import ChatRequest, ChatResponse
 from server.auth import limiter, verify_admin_key, verify_jwt_token
 from server.utils import setup_logging
+from server.supabase_client import get_document_stats
+from server.ingest import index_documents
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +70,9 @@ async def get_status(request: Request):
     """
     config = get_config()
     
+    # Get document stats from Supabase
+    doc_stats = get_document_stats()
+    
     return {
         "status": "healthy",
         "version": "0.1.0",
@@ -78,8 +83,8 @@ async def get_status(request: Request):
             "chunk_token_threshold": config.chunk_token_threshold
         },
         "indexing": {
-            "documents_count": None,  # TODO: Query from Supabase in Step 2
-            "last_index_time": None   # TODO: Query from manifest table in Step 2
+            "documents_count": doc_stats["documents_count"],
+            "last_index_time": doc_stats["last_index_time"]
         }
     }
 
@@ -127,7 +132,8 @@ async def trigger_indexing(
 ):
     """Trigger document indexing (admin only).
     
-    Note: This is a placeholder returning 501. Full implementation in Step 2.
+    Scans processed markdown files, detects changes, generates embeddings,
+    and upserts to Supabase with manifest tracking.
     
     Args:
         request: FastAPI request object (required by slowapi)
@@ -135,23 +141,32 @@ async def trigger_indexing(
         full: If True, perform full re-index; otherwise incremental
     
     Returns:
-        Indexing results with counts
+        Indexing results with counts and statistics
     """
     verify_admin_key(x_admin_key)
     
     logger.info(f"Indexing triggered: full={full}")
     
-    # TODO: Implement in Step 2
-    # 1. Scan processed files
-    # 2. Check manifest for changes
-    # 3. Parse and chunk documents
-    # 4. Generate embeddings
-    # 5. Upsert to Supabase
+    try:
+        # Run indexing pipeline
+        results = await index_documents(full_reindex=full)
+        
+        if results["success"]:
+            logger.info(f"Indexing completed successfully: {results}")
+            return results
+        else:
+            logger.error(f"Indexing failed: {results.get('error', 'Unknown error')}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Indexing failed: {results.get('error', 'Unknown error')}"
+            )
     
-    raise HTTPException(
-        status_code=501,
-        detail="Indexing endpoint not yet implemented. Will be available in Step 2."
-    )
+    except Exception as e:
+        logger.error(f"Indexing failed with exception: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Indexing failed: {str(e)}"
+        )
 
 
 if __name__ == "__main__":
