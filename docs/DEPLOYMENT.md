@@ -2,6 +2,8 @@
 
 This document outlines recommended steps to deploy the PineScript RAG Server in production.
 
+**Audience:** operators and maintainers. This file is the canonical production/deployment guide. For local developer instructions and quick run commands, see `server/STARTUP.md`.
+
 ## Required environment variables
 
 Set these as secrets in your hosting provider (Render, Fly, Docker, etc.):
@@ -49,15 +51,33 @@ If using a process manager (systemd, k8s), prefer multiple worker processes and 
 
 ## Running migrations and indexing
 
-- The repo contains SQL migrations in `migrations/` — apply them to your Supabase project as needed.
-- To index documents on startup or administratively, call the internal endpoint:
+- Apply migrations: the repo contains SQL migrations in `migrations/` — apply them to your Supabase project.
 
-```
-POST /internal/index
-Headers: X-Admin-Key: <ADMIN_API_KEY>
-```
+- Example (Supabase SQL editor): copy/paste `migrations/0001_create_documents_and_file_manifest.sql` and run it.
 
-Use `?background=true` to schedule indexing in the background.
+- Administrative indexing options:
+
+  - Background (non-blocking from the API):
+
+    ```bash
+    curl -sS -X POST "http://localhost:8000/internal/index?background=true" -H "X-Admin-Key: $ADMIN_API_KEY" | jq .
+    ```
+
+  - Synchronous (one-off, recommended for full reindexes): run the ingest CLI inside the image to avoid request worker timeouts:
+
+    ```bash
+    # run inside a running container
+    docker exec -it <container> python /app/server/run_ingest.py --full --log-level INFO
+
+    # or as a one-off container
+    docker run --rm \
+      --env-file .env \
+      -v "$(pwd)/pinescript_docs/processed:/app/pinescript_docs/processed:ro" \
+      pinescript-rag-server:latest \
+      python /app/server/run_ingest.py --full --log-level INFO
+    ```
+
+  - Note: the API also supports `POST /internal/index` with `?background=false` but long-running synchronous requests may be killed by Gunicorn unless you increase the worker `--timeout`.
 
 ## Monitoring and logging
 
@@ -68,3 +88,23 @@ Use `?background=true` to schedule indexing in the background.
 
 - Use HS256 (`JWT_SECRET`) or RS256 (`JWKS_URL`) for verifying JWTs. Prefer RS256 in distributed deployments with centralized auth.
 - Do not expose Supabase service role key to clients. Keep it server-side only.
+
+## Example `.env` (minimal)
+
+Create a `.env` file at the repo root with the following values for local testing:
+
+```
+SUPABASE_URL=https://your.supabase.url
+SUPABASE_SERVICE_ROLE_KEY=service-role-key
+OPENAI_API_KEY=sk-xxx
+ADMIN_API_KEY=change-me
+JWT_SECRET=test-secret
+```
+
+After modifying the `Dockerfile`, rebuild the image to pick up `GUNICORN_CMD_ARGS` defaults:
+
+```bash
+docker build -t pinescript-rag-server:latest .
+```
+
+Then run with mounts or env overrides as needed (see `server/STARTUP.md` for examples).

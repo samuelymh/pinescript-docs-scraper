@@ -103,6 +103,16 @@ pinescript_docs/
 processed_all_docs.md                  # Combined processed file (written to repository root)
 ```
 
+## Running the server (RAG API)
+
+The full deployment and operational instructions are maintained in `docs/DEPLOYMENT.md` (operator-focused). For local development and quick commands see `server/STARTUP.md` (developer-focused).
+
+- Quick start (dev): see `server/STARTUP.md`
+- Production / deployment: see `docs/DEPLOYMENT.md`
+
+In short: apply SQL migrations in `migrations/`, set required secrets (see `docs/DEPLOYMENT.md`), build the Docker image (optional), and either run the server locally with `uvicorn` for development or use the Docker image / Gunicorn for production-like runs. Use the ingest CLI (`server/run_ingest.py`) for full reindexes to avoid worker timeouts.
+
+
 ## Customization
 
 The crawler and processor can be customized through their respective class initializations:

@@ -2,6 +2,8 @@
 
 This file documents quick ways to run the server locally (development), run a production-like process locally, and build/run with Docker. It also lists alternatives when `docker` is not available on your machine.
 
+**Audience:** developers and contributors doing local development and testing. For production deployment and operational guidance, see `docs/DEPLOYMENT.md`.
+
 ## Quick dev run (recommended while developing)
 
 1. Activate your virtualenv and install dependencies (if not already):
@@ -21,6 +23,17 @@ uvicorn server.app:app --reload --host 0.0.0.0 --port 8000
 
 ```bash
 curl http://localhost:8000/status
+```
+
+## Run database migrations (required before indexing)
+
+Apply the SQL files in the `migrations/` folder to your Supabase/Postgres instance before running the indexer.
+
+If you use the Supabase SQL editor, copy/paste the contents of `migrations/0001_create_documents_and_file_manifest.sql` and run it. If you prefer psql:
+
+```bash
+# Example using psql (set PG* env vars or use connection string)
+psql "$DATABASE_URL" -f migrations/0001_create_documents_and_file_manifest.sql
 ```
 
 ## Production-like local run (Gunicorn + Uvicorn workers)
@@ -63,6 +76,15 @@ SUPABASE_SERVICE_ROLE_KEY=eyJ...
 OPENAI_API_KEY=sk-...
 JWT_SECRET=some-secret
 ADMIN_API_KEY=admin-secret
+```
+
+Example: run with local processed docs mounted, and override Gunicorn args if needed:
+
+```bash
+docker run --rm -p 8000:8000 --env-file .env \
+  -v "$(pwd)/pinescript_docs/processed:/app/pinescript_docs/processed:ro" \
+  -e GUNICORN_CMD_ARGS='--timeout 180 --graceful-timeout 60' \
+  pinescript-rag-server:latest
 ```
 
 ### Docker CLI not found (`zsh: command not found: docker`)
@@ -120,3 +142,18 @@ curl -X POST http://localhost:8000/chat \
 - For macOS Apple Silicon (M1/M2), prefer Docker Desktop or Colima; some images or dependencies may require platform args (e.g., `--platform linux/amd64`) though the base `python:3.11-slim` image used should work on `linux/arm64` as well.
 
 If you want, I can create a `scripts/run.sh` to wrap common run commands, or add a `docker-compose.yml` for local development (with optional local Postgres for testing). Let me know which you prefer.
+
+## Quick JWT token for testing (HS256)
+
+If you set `JWT_SECRET` (HS256) and want to test `POST /chat` locally, generate a token:
+
+```bash
+python - <<'PY'
+from jose import jwt
+import time
+payload={"sub":"local-test-user","iat":int(time.time()),"exp":int(time.time())+3600}
+print(jwt.encode(payload, "${JWT_SECRET:-test-secret}", algorithm="HS256"))
+PY
+```
+
+Use the printed token as `Authorization: Bearer <token>` when calling `/chat`.
