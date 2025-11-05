@@ -2,7 +2,6 @@
 
 Scans, parses, chunks, embeds, and indexes processed markdown files.
 """
-import os
 import re
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
