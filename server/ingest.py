@@ -215,8 +215,8 @@ def parse_document(filepath: Path) -> List[Document]:
     chunk_count = len(chunks)
     
     for chunk_content, section_heading, chunk_index in chunks:
-        # Calculate metadata
-        token_count = count_tokens(chunk_content)
+        # Calculate metadata (count tokens for embedding model)
+        token_count = count_tokens(chunk_content, model=config.embedding_model)
         has_code = detect_code_snippets(chunk_content)
         doc_id = generate_doc_id(filename, chunk_index)
         
@@ -245,6 +245,71 @@ def parse_document(filepath: Path) -> List[Document]:
         )
     
     return documents
+
+
+def split_text_by_token_limit(text: str, max_tokens: int, overlap_tokens: int, model: str) -> List[str]:
+    """Split text into parts each under max_tokens (approximate using token counts).
+
+    Uses a conservative character-per-token estimate for slicing and then adjusts
+    boundaries to prefer sentence breaks via extract_token_overlap.
+    """
+    parts = []
+    # Fast path
+    if count_tokens(text, model=model) <= max_tokens:
+        return [text]
+
+    # Estimate characters per token (conservative)
+    # Use a smaller chars-per-token to produce smaller chunks (safer for code/docs)
+    chars_per_token = 3
+    max_chars = max_tokens * chars_per_token
+    start = 0
+    length = len(text)
+
+    while start < length:
+        end = min(length, start + max_chars)
+        chunk = text[start:end]
+
+        # If we're not at end, try to back up to last sentence boundary for nicer splits
+        if end < length:
+            # Look for a sentence break near the end of chunk
+            sentence_breaks = ['. ', '.\n', '? ', '!\n']
+            best_pos = -1
+            for sep in sentence_breaks:
+                pos = chunk.rfind(sep)
+                if pos > best_pos:
+                    best_pos = pos
+            if best_pos > 0:
+                # keep up to sentence end
+                chunk = chunk[: best_pos + 1]
+                end = start + len(chunk)
+
+        # Ensure chunk truly fits the token limit; if not, shrink progressively.
+        actual_tokens = count_tokens(chunk, model=model)
+        if actual_tokens > max_tokens:
+            # progressively shrink chunk until it fits
+            attempt = 0
+            while actual_tokens > max_tokens and attempt < 10:
+                # shrink to 80% of current size (conservative)
+                new_len = max(200, int(len(chunk) * 0.8))
+                chunk = chunk[:new_len]
+                actual_tokens = count_tokens(chunk, model=model)
+                attempt += 1
+            if actual_tokens > max_tokens:
+                # As a last resort, force cut to max_chars/2
+                chunk = chunk[: max_chars // 2]
+                actual_tokens = count_tokens(chunk, model=model)
+
+        parts.append(chunk.strip())
+
+        # Prepare next start with overlap
+        if end >= length:
+            break
+
+        # compute overlap in chars
+        overlap_chars = max(50, overlap_tokens * chars_per_token)
+        start = max(0, end - overlap_chars)
+
+    return parts
 
 
 def check_manifest(
@@ -387,6 +452,62 @@ async def index_documents(full_reindex: bool = False) -> Dict[str, any]:
     
     logger.info(f"Parsed {len(all_documents)} document chunks")
     
+    # Step 4.5: Ensure no document exceeds embedding model context length by
+    # splitting overly-large chunks. Rebuild documents per-file so chunk_count
+    # and chunk_index remain consistent for each source file.
+    embedding_model = config.embedding_model
+    # conservative per-model max token limits (fallback to 8192)
+    MODEL_MAX_TOKENS = {
+        "text-embedding-3-small": 8192,
+        "text-embedding-3-large": 8192,
+        "text-embedding-ada-002": 8192
+    }
+    max_tokens_allowed = MODEL_MAX_TOKENS.get(embedding_model, 8192)
+
+    expanded_documents: List[Document] = []
+    # Group by filename
+    files_map: Dict[str, List[Document]] = {}
+    for doc in all_documents:
+        files_map.setdefault(doc.source_filename, []).append(doc)
+
+    for filename, docs in files_map.items():
+        new_parts = []  # tuples (content, section_heading, code_snippet, metadata)
+
+        for doc in docs:
+            # If doc is small enough (by embedding model), keep as-is
+            if doc.token_count <= max_tokens_allowed:
+                new_parts.append((doc.content, doc.section_heading, doc.code_snippet, doc.metadata))
+                continue
+
+            # Otherwise split into smaller pieces
+            subtexts = split_text_by_token_limit(doc.content, max_tokens_allowed, config.chunk_overlap_tokens, model=embedding_model)
+            for i, sub in enumerate(subtexts):
+                # keep the section heading only for the first subpart of this doc
+                heading = doc.section_heading if i == 0 else None
+                has_code = detect_code_snippets(sub)
+                new_parts.append((sub, heading, has_code, doc.metadata))
+
+        # Create Document objects with new chunk_count and chunk_index
+        total = len(new_parts)
+        for idx, (content, heading, has_code, metadata) in enumerate(new_parts):
+            token_count = count_tokens(content, model=embedding_model)
+            doc_id = generate_doc_id(filename, idx)
+            new_doc = Document(
+                id=doc_id,
+                content=content,
+                source_filename=filename,
+                chunk_index=idx,
+                chunk_count=total,
+                section_heading=heading,
+                token_count=token_count,
+                code_snippet=has_code,
+                metadata=metadata,
+                embedding=None
+            )
+            expanded_documents.append(new_doc)
+
+    all_documents = expanded_documents
+
     # Step 5: Estimate embedding cost
     avg_tokens = sum(doc.token_count for doc in all_documents) / len(all_documents)
     cost_estimate = estimate_embedding_cost(
