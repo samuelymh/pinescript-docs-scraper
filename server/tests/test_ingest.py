@@ -468,3 +468,103 @@ def test_full_indexing_pipeline():
     # This would test the full index_documents() flow
     # Skipped by default as it requires Supabase setup
     pass
+
+
+# Optional live Supabase integration tests
+import os
+
+
+@pytest.mark.skipif(
+    not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")),
+    reason="Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables"
+)
+def test_live_supabase_upsert_and_delete():
+    """Test upserting a Document to live Supabase and deleting by filename.
+
+    This test runs only when the required Supabase env vars are present.
+    It performs a lightweight upsert and cleanup to avoid interfering with
+    existing data.
+    """
+    from server.models import Document
+    from server.supabase_client import upsert_documents, delete_documents_by_filename
+    from server.utils import generate_doc_id
+    from server.embed_client import EMBEDDING_DIM
+    from datetime import datetime
+
+    # Build a minimal document
+    filename = f"test_live_{int(datetime.now().timestamp())}.md"
+    doc_id = generate_doc_id(filename, 0)
+    doc = Document(
+        id=doc_id,
+        content="# Live test\nThis is a live supabase test.",
+        source_filename=filename,
+        chunk_index=0,
+        chunk_count=1,
+        section_heading=None,
+        token_count=10,
+        code_snippet=False,
+        metadata={"test": True},
+        embedding=[0.0] * EMBEDDING_DIM
+    )
+
+    # Upsert to Supabase
+    result = upsert_documents([doc])
+    assert result.get("success") is True
+    assert result.get("count", 0) >= 1
+
+    # Cleanup by deleting documents for the test filename
+    del_result = delete_documents_by_filename(filename)
+    assert del_result.get("success") is True
+
+
+@pytest.mark.skipif(
+    not (os.environ.get("SUPABASE_URL") and os.environ.get("SUPABASE_SERVICE_ROLE_KEY")),
+    reason="Requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY environment variables"
+)
+def test_live_supabase_manifest_roundtrip():
+    """Test updating and fetching a manifest entry in live Supabase."""
+    from server.supabase_client import update_manifest, fetch_manifest
+    from server.models import FileManifest
+    from datetime import datetime
+    # Ensure a matching documents row exists because `file_manifest.doc_id` has
+    # a foreign key constraint referencing `documents.id` in the live DB.
+    from server.models import Document
+    from server.supabase_client import upsert_documents
+    from server.embed_client import EMBEDDING_DIM
+
+    filename = f"manifest_test_{int(datetime.now().timestamp())}.md"
+    entry = FileManifest(
+        filename=filename,
+        content_hash="deadbeef",
+        last_indexed=datetime.now(),
+        doc_id="doc_live_test"
+    )
+
+    # Upsert a minimal document with the same doc_id so the FK constraint
+    # on `file_manifest.doc_id` is satisfied.
+    doc = Document(
+        id=entry.doc_id,
+        content="manifest placeholder",
+        source_filename=filename,
+        chunk_index=0,
+        chunk_count=1,
+        section_heading=None,
+        token_count=1,
+        code_snippet=False,
+        metadata={"test": True},
+        embedding=[0.0] * EMBEDDING_DIM,
+    )
+
+    upsert_documents([doc])
+
+    up_result = update_manifest([entry])
+    assert up_result.get("success") is True
+    assert up_result.get("count", 0) >= 1
+
+    manifest = fetch_manifest()
+    assert filename in manifest
+
+    # Cleanup: remove manifest entry and any documents (best-effort)
+    from server.supabase_client import delete_documents_by_filename
+    delete_documents_by_filename(filename)
+

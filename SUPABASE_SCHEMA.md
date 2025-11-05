@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS documents (
     token_count INTEGER NOT NULL,
     code_snippet BOOLEAN NOT NULL DEFAULT false,
     metadata JSONB DEFAULT '{}',
-    embedding vector(3072),  -- text-embedding-3-large dimension
+    embedding vector(1536),  -- text-embedding-3-small dimension
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
@@ -87,6 +87,36 @@ CREATE INDEX IF NOT EXISTS idx_file_manifest_last_indexed
 ON file_manifest(last_indexed DESC);
 ```
 
+## Foreign Key & Testing Notes
+
+- **Foreign key constraint:** The `file_manifest.doc_id` column is a foreign key referencing `documents(id)` with `ON DELETE CASCADE`. This means any insert or upsert into `file_manifest` must reference an existing `documents.id` value, or the database will raise a foreign-key violation (this is the cause of the failure seen in live tests).
+
+- **Testing guidance:** Integration or live tests that call `update_manifest()` (or otherwise insert into `file_manifest`) should ensure a corresponding `documents` row exists first. In tests it's acceptable to upsert a minimal placeholder `Document` with the same `doc_id` used in the manifest entry, then clean it up after the test. Example (Python):
+
+```py
+# Example: create a minimal document before upserting a manifest entry
+from server.models import Document
+from server.supabase_client import upsert_documents
+from server.embed_client import EMBEDDING_DIM
+
+doc = Document(
+    id="doc_live_test",
+    content="placeholder",
+    source_filename="manifest_test.md",
+    chunk_index=0,
+    chunk_count=1,
+    section_heading=None,
+    token_count=1,
+    code_snippet=False,
+    metadata={"test": True},
+    embedding=[0.0] * EMBEDDING_DIM,
+)
+
+upsert_documents([doc])
+```
+
+- **Cleanup:** After the manifest test completes you can delete the placeholder document (or rely on `ON DELETE CASCADE` behavior if you remove the `file_manifest` row first).
+
 ## Schema Details
 
 ### Field Descriptions
@@ -102,7 +132,7 @@ ON file_manifest(last_indexed DESC);
 - **token_count**: Estimated token count using tiktoken (cl100k_base encoding)
 - **code_snippet**: Boolean flag indicating presence of code (triple backticks, single backticks, or "Pine Script®\nCopied\n" pattern)
 - **metadata**: Flexible JSONB field for additional metadata (e.g., processed_timestamp)
-- **embedding**: Vector embedding from OpenAI `text-embedding-3-large` (3072 dimensions)
+- **embedding**: Vector embedding from OpenAI `text-embedding-3-small` (1536 dimensions)
 - **created_at**: Timestamp when document was first indexed
 - **updated_at**: Timestamp when document was last updated
 
