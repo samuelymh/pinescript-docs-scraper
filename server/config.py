@@ -47,6 +47,27 @@ class Config(BaseSettings):
         default=None,
         description="Admin API key for /internal/* endpoints"
     )
+    # JWT / Auth configuration
+    jwt_secret: Optional[str] = Field(
+        default=None,
+        description="HMAC secret for HS256 JWT verification (development)"
+    )
+    jwt_algorithm: str = Field(
+        default="HS256",
+        description="JWT signing algorithm to expect (HS256 or RS256)"
+    )
+    jwks_url: Optional[str] = Field(
+        default=None,
+        description="JWKS URL to fetch public keys for RS256 verification"
+    )
+    jwt_audience: Optional[str] = Field(
+        default=None,
+        description="Expected JWT audience (optional)"
+    )
+    jwt_issuer: Optional[str] = Field(
+        default=None,
+        description="Expected JWT issuer (optional)"
+    )
     
     # RAG configuration
     max_context_docs: int = Field(

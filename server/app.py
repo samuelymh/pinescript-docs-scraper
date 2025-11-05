@@ -12,10 +12,18 @@ import logging
 
 from server.config import get_config
 from server.models import ChatRequest, ChatResponse
-from server.auth import limiter, verify_admin_key, verify_jwt_token
+from server.auth import verify_admin_key, verify_jwt_token, get_rate_limit_key
+from slowapi import Limiter
 from server.utils import setup_logging
 from server.supabase_client import get_document_stats
 from server.ingest import index_documents
+import asyncio
+
+# Retrieval / LLM wiring
+from fastapi.concurrency import run_in_threadpool
+from server.embed_client import generate_single_embedding
+from server.retriever import hybrid_search, assemble_context
+from server.llm_client import create_chat_completion
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +51,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# Add rate limiter to app state
+# Create a rate limiter using per-user key function and attach to app
+limiter = Limiter(key_func=get_rate_limit_key)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
@@ -109,18 +118,45 @@ async def chat(
         Chat response with generated code and sources
     """
     logger.info(f"Chat request from user {user.get('sub')}: {chat_request.query[:50]}...")
-    
-    # TODO: Implement in Step 4
-    # 1. Generate query embedding
-    # 2. Retrieve relevant documents
-    # 3. Assemble context
-    # 4. Call LLM
-    # 5. Post-process and return response
-    
-    raise HTTPException(
-        status_code=501,
-        detail="Chat endpoint not yet implemented. Will be available in Step 4."
-    )
+
+    try:
+        # 1) Generate query embedding (run in threadpool to avoid blocking)
+        query_embedding = await run_in_threadpool(generate_single_embedding, chat_request.query)
+
+        # 2) Retrieve relevant documents (hybrid search)
+        retrieved = await run_in_threadpool(
+            hybrid_search, query_embedding, chat_request.query, chat_request.max_context_docs
+        )
+
+        # 3) Assemble context to respect token budgets
+        selected_docs, prompt_tokens = await run_in_threadpool(assemble_context, retrieved)
+
+        # Convert docs to plain dicts for LLM client
+        context_docs = [d.model_dump() for d in selected_docs]
+
+        # 4) Call LLM to create chat completion
+        llm_result = await run_in_threadpool(
+            create_chat_completion, chat_request.query, context_docs, float(chat_request.temperature)
+        )
+
+        # 5) Build response model with provenance
+        resp_text = llm_result.get("response", "") or ""
+        model_used = llm_result.get("model", "") or ""
+        tokens = llm_result.get("tokens", {})
+        sources = llm_result.get("sources", [])
+
+        return ChatResponse(
+            response=resp_text,
+            sources=sources,
+            tokens_used=tokens,
+            model=model_used
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Chat request failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.post("/internal/index")
@@ -128,7 +164,8 @@ async def chat(
 async def trigger_indexing(
     request: Request,
     x_admin_key: str = Header(..., alias="X-Admin-Key"),
-    full: bool = False
+    full: bool = False,
+    background: bool = False
 ):
     """Trigger document indexing (admin only).
     
@@ -148,9 +185,15 @@ async def trigger_indexing(
     logger.info(f"Indexing triggered: full={full}")
     
     try:
-        # Run indexing pipeline
+        if background:
+            # Schedule indexing asynchronously and return immediately
+            logger.info("Scheduling background indexing task")
+            asyncio.create_task(index_documents(full_reindex=full))
+            return {"started": True, "background": True}
+
+        # Run indexing pipeline synchronously
         results = await index_documents(full_reindex=full)
-        
+
         if results["success"]:
             logger.info(f"Indexing completed successfully: {results}")
             return results
@@ -160,7 +203,7 @@ async def trigger_indexing(
                 status_code=500,
                 detail=f"Indexing failed: {results.get('error', 'Unknown error')}"
             )
-    
+
     except Exception as e:
         logger.error(f"Indexing failed with exception: {e}")
         raise HTTPException(
