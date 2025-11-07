@@ -12,7 +12,7 @@ import logging
 
 from server.config import get_config
 from server.models import ChatRequest, ChatResponse
-from server.auth import verify_admin_key, verify_jwt_token, get_rate_limit_key
+from server.auth import verify_admin_key, verify_jwt_token, get_rate_limit_key, is_email_allowed
 from slowapi import Limiter
 from server.utils import setup_logging
 from server.supabase_client import get_document_stats
@@ -76,6 +76,61 @@ async def health():
     expensive startup checks.
     """
     return {"status": "ok"}
+
+
+# Simple email login endpoint to mint HS256 JWTs for allowed emails.
+# This is intentionally minimal: it verifies the email against the configured
+# `allowed_emails` (from env `ALLOWED_EMAILS`) and signs a token using the
+# configured `jwt_secret`/`jwt_algorithm` in `server.config`.
+@app.post("/api/login")
+async def api_login(request: Request):
+    """Issue a short-lived JWT for a whitelisted email.
+
+    Request body: { "email": "user@example.com" }
+    Response: 200 { "token": "..." } or 403/400/500 on error
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    email = body.get("email")
+    if not email or not isinstance(email, str):
+        raise HTTPException(status_code=400, detail="Email is required")
+
+    # basic validation
+    import re
+    EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+    if not EMAIL_RE.match(email):
+        raise HTTPException(status_code=400, detail="Invalid email format")
+
+    # Config and allowed emails — require explicit allowlist (deny-by-default)
+    config = get_config()
+    if not is_email_allowed(email, config):
+        logger.info("Login attempt for non-allowed or missing allowlist for email: %s", email)
+        raise HTTPException(status_code=403, detail="Email not allowed")
+
+    # Ensure JWT secret is configured
+    if not config.jwt_secret:
+        logger.error("JWT_SECRET not configured; refusing to issue tokens")
+        raise HTTPException(status_code=503, detail="Server not configured for auth")
+
+    # Build token payload and sign using python-jose
+    from jose import jwt as jose_jwt
+    import time
+
+    now = int(time.time())
+    exp = now + int(getattr(config, "jwt_expiration_seconds", 3600))
+    payload = {"sub": email, "iat": now, "exp": exp}
+    # include optional issuer/audience if configured
+    if config.jwt_issuer:
+        payload["iss"] = config.jwt_issuer
+    if config.jwt_audience:
+        payload["aud"] = config.jwt_audience
+
+    token = jose_jwt.encode(payload, config.jwt_secret, algorithm=config.jwt_algorithm)
+
+    return {"token": token}
 
 
 @app.get("/status")

@@ -29,6 +29,38 @@ _JWKS_CACHE: Dict[str, any] = {"jwks": None, "fetched_at": 0}
 _JWKS_TTL = 60 * 60  # 1 hour
 
 
+def _parse_allowed_emails(config) -> Optional[set]:
+    """Parse `allowed_emails` from config into a lowercase set.
+
+    Returns None when no allowlist is configured (empty/None), so callers
+    can implement deny-by-default behavior when the result is None.
+    """
+    try:
+        raw = (getattr(config, "allowed_emails", None) or "").strip()
+    except Exception:
+        raw = ""
+
+    if not raw:
+        return None
+
+    return {e.strip().lower() for e in raw.split(",") if e.strip()}
+
+
+def is_email_allowed(email: str, config) -> bool:
+    """Return True if the given email is explicitly allowed.
+
+    If no allowlist is configured (parsed result is None) this function
+    returns False to enforce deny-by-default.
+    """
+    if not email:
+        return False
+    allowed = _parse_allowed_emails(config)
+    if not allowed:
+        # Deny by default when allowlist is not configured
+        return False
+    return email.strip().lower() in allowed
+
+
 def verify_admin_key(api_key: Optional[str]) -> bool:
     """Verify admin API key for /internal/* endpoints.
 
@@ -90,13 +122,11 @@ async def verify_jwt_token(
                 issuer=config.jwt_issuer or None,
             )
             logger.debug("JWT verified with HS secret: sub=%s", payload.get("sub"))
-            # Enforce optional allowlist (if configured)
+            # Enforce allowlist — deny by default when not configured
             sub = payload.get("sub")
-            if sub and config.allowed_emails:
-                allowed = {e.strip().lower() for e in config.allowed_emails.split(",") if e.strip()}
-                if sub.lower() not in allowed:
-                    logger.warning("JWT subject not in allowed_emails: %s", sub)
-                    raise HTTPException(status_code=403, detail="Email not allowed")
+            if not sub or not is_email_allowed(sub, config):
+                logger.warning("JWT subject not allowed or missing: %s", sub)
+                raise HTTPException(status_code=403, detail="Email not allowed")
             return payload
 
         # Otherwise, try JWKS flow for RS256
@@ -130,13 +160,11 @@ async def verify_jwt_token(
                 issuer=config.jwt_issuer or None,
             )
             logger.debug("JWT verified via JWKS: sub=%s", payload.get("sub"))
-            # Enforce optional allowlist (if configured)
+            # Enforce allowlist — deny by default when not configured
             sub = payload.get("sub")
-            if sub and config.allowed_emails:
-                allowed = {e.strip().lower() for e in config.allowed_emails.split(",") if e.strip()}
-                if sub.lower() not in allowed:
-                    logger.warning("JWT subject not in allowed_emails: %s", sub)
-                    raise HTTPException(status_code=403, detail="Email not allowed")
+            if not sub or not is_email_allowed(sub, config):
+                logger.warning("JWT subject not allowed or missing: %s", sub)
+                raise HTTPException(status_code=403, detail="Email not allowed")
             return payload
 
         # No verification method configured
