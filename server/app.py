@@ -201,9 +201,13 @@ async def chat(
         # Convert docs to plain dicts for LLM client
         context_docs = [d.model_dump() for d in selected_docs]
 
-        # 4) Call LLM to create chat completion
+        # 4) Call LLM to create chat completion (include optional conversation history)
         llm_result = await run_in_threadpool(
-            create_chat_completion, chat_request.query, context_docs, float(chat_request.temperature)
+            create_chat_completion,
+            chat_request.query,
+            context_docs,
+            float(chat_request.temperature),
+            conversation_history=chat_request.conversation_history,
         )
 
         # 5) Build response model with provenance

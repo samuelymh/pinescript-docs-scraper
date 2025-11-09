@@ -3,7 +3,7 @@
 This module encapsulates prompt assembly, model selection logic, and a thin
 wrapper around the OpenAI client so tests can mock the low-level calls.
 """
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 import logging
 
 from server.config import get_config
@@ -39,7 +39,8 @@ def choose_model(prompt_tokens: int) -> str:
 def create_chat_completion(
     user_query: str,
     context_docs: List[Dict[str, Any]],
-    temperature: float = 0.1
+    temperature: float = 0.1,
+    conversation_history: Optional[List[Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Assemble prompt and call OpenAI to produce a response.
 
@@ -50,9 +51,36 @@ def create_chat_completion(
     # Build context text from docs
     context_parts = [f"Source: {d['source_filename']}\n{d['content']}" for d in context_docs]
 
-    # Compose messages
-    messages = [system_prompt] + context_parts + [user_query]
-    prompt_tokens = estimate_prompt_tokens(messages)
+    # Compose parts used for token estimation: system, optional history, context, query
+    parts: List[str] = [system_prompt]
+    if conversation_history:
+        for m in conversation_history:
+            parts.append(m.get("content", ""))
+    parts.extend(context_parts)
+    parts.append(user_query)
+
+    prompt_tokens = estimate_prompt_tokens(parts)
+
+    # If prompt is over budget, trim oldest conversation history entries first
+    config = get_config()
+    budget = getattr(config, "prompt_token_budget", None)
+    if budget is not None and prompt_tokens > budget and conversation_history:
+        # Work on a mutable copy of the history
+        trimmed_history = list(conversation_history)
+        # Remove oldest entries until we are within budget or have removed all history
+        while trimmed_history and prompt_tokens > budget:
+            trimmed_history.pop(0)
+            # rebuild parts and recompute tokens
+            parts = [system_prompt] + [m.get("content", "") for m in trimmed_history] + context_parts + [user_query]
+            prompt_tokens = estimate_prompt_tokens(parts)
+
+        if prompt_tokens > budget:
+            # Even after removing history we're still over budget; log and continue
+            logger = logging.getLogger(__name__)
+            logger.info("Prompt still exceeds token budget after trimming history: %d > %d", prompt_tokens, budget)
+        else:
+            # Replace conversation_history with the trimmed version for the messages payload later
+            conversation_history = trimmed_history
 
     model = choose_model(prompt_tokens)
     client = init_openai_client()
@@ -60,12 +88,22 @@ def create_chat_completion(
     # Wrap the request in a try/except so tests can assert on request payload
     try:
         # Use the Responses API if available; fall back to chat completions shape.
+        # Build the chat-style messages payload, including conversation history if present
+        messages_payload = [
+            {"role": "system", "content": system_prompt}
+        ]
+        if conversation_history:
+            for m in conversation_history:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                messages_payload.append({"role": role, "content": content})
+
+        # Append a final user message containing the retrieved context + the current query
+        messages_payload.append({"role": "user", "content": "\n\n".join(context_parts + [user_query])})
+
         resp = client.chat.completions.create(
             model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": "\n\n".join(context_parts + [user_query])}
-            ],
+            messages=messages_payload,
             temperature=float(temperature),
             max_tokens=get_config().llm_max_completion_tokens
         )
