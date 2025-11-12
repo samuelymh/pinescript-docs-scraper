@@ -130,7 +130,17 @@ async def api_login(request: Request):
 
     token = jose_jwt.encode(payload, config.jwt_secret, algorithm=config.jwt_algorithm)
 
-    return {"token": token}
+    # issue a refresh token (longer lived)
+    refresh_exp = now + int(getattr(config, "jwt_refresh_expiration_seconds", 604800))
+    refresh_payload = {"sub": email, "iat": now, "exp": refresh_exp}
+    if config.jwt_issuer:
+        refresh_payload["iss"] = config.jwt_issuer
+    if config.jwt_audience:
+        refresh_payload["aud"] = config.jwt_audience
+
+    refresh_token = jose_jwt.encode(refresh_payload, config.jwt_secret, algorithm=config.jwt_algorithm)
+
+    return {"token": token, "refresh_token": refresh_token}
 
 
 @app.get("/status")
@@ -222,6 +232,94 @@ async def chat(
             tokens_used=tokens,
             model=model_used
         )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Chat request failed: %s", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/refresh")
+async def api_refresh(request: Request):
+    """Exchange a refresh token for a new access token (and rotate refresh token).
+
+    Accepts refresh token in JSON body {"refresh_token": "..."} or via cookie
+    named `pinescript_refresh`. Returns {"token": "...", "refresh_token": "..."}.
+    """
+    try:
+        config = get_config()
+
+        # attempt to read refresh token from cookie header first
+        refresh_token = None
+        cookie_header = request.headers.get("cookie")
+        if cookie_header:
+            # simple parse; look for pinescript_refresh=...
+            parts = [p.strip() for p in cookie_header.split(";")]
+            for p in parts:
+                if p.startswith("pinescript_refresh="):
+                    refresh_token = p.split("=", 1)[1]
+                    break
+
+        if not refresh_token:
+            try:
+                body = await request.json()
+                refresh_token = body.get("refresh_token")
+            except Exception:
+                refresh_token = None
+
+        if not refresh_token:
+            raise HTTPException(status_code=400, detail="Missing refresh token")
+
+        from jose import jwt as jose_jwt
+        from jose.exceptions import JWTError
+
+        try:
+            payload = jose_jwt.decode(
+                refresh_token,
+                config.jwt_secret,
+                algorithms=[config.jwt_algorithm],
+                audience=config.jwt_audience or None,
+                issuer=config.jwt_issuer or None,
+            )
+        except JWTError as e:
+            logger.warning("Refresh token invalid: %s", e)
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+        sub = payload.get("sub")
+        if not sub or not is_email_allowed(sub, config):
+            logger.warning("Refresh token subject not allowed or missing: %s", sub)
+            raise HTTPException(status_code=403, detail="Email not allowed")
+
+        # Issue a new access token
+        import time
+        now = int(time.time())
+        exp = now + int(getattr(config, "jwt_expiration_seconds", 3600))
+        new_payload = {"sub": sub, "iat": now, "exp": exp}
+        if config.jwt_issuer:
+            new_payload["iss"] = config.jwt_issuer
+        if config.jwt_audience:
+            new_payload["aud"] = config.jwt_audience
+
+        new_token = jose_jwt.encode(new_payload, config.jwt_secret, algorithm=config.jwt_algorithm)
+
+        # Optionally rotate refresh token: issue a fresh refresh token
+        refresh_exp = now + int(getattr(config, "jwt_refresh_expiration_seconds", 604800))
+        new_refresh_payload = {"sub": sub, "iat": now, "exp": refresh_exp}
+        if config.jwt_issuer:
+            new_refresh_payload["iss"] = config.jwt_issuer
+        if config.jwt_audience:
+            new_refresh_payload["aud"] = config.jwt_audience
+
+        new_refresh_token = jose_jwt.encode(new_refresh_payload, config.jwt_secret, algorithm=config.jwt_algorithm)
+
+        return {"token": new_token, "refresh_token": new_refresh_token}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Refresh token exchange failed: %s", e)
+        raise HTTPException(status_code=500, detail="Internal server error")
 
     except HTTPException:
         raise

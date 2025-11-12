@@ -68,6 +68,11 @@ class Config(BaseSettings):
         default=None,
         description="Expected JWT issuer (optional)"
     )
+    # Refresh token lifetime (seconds)
+    jwt_refresh_expiration_seconds: int = Field(
+        default=604800,  # 7 days
+        description="Refresh token expiry in seconds"
+    )
     
     # RAG configuration
     max_context_docs: int = Field(
