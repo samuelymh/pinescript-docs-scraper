@@ -5,3 +5,4 @@ pinescript_docs
 
 .vscode
 .pytest_cache/
+.DS_Store
