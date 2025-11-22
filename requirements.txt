@@ -28,3 +28,6 @@ pytest>=7.4.0
 httpx>=0.25.0  # for FastAPI TestClient
 gunicorn>=20.1.0
 pydantic-settings>=0.5.0
+
+# Google GenAI dependencies
+google-genai>=1.51.0

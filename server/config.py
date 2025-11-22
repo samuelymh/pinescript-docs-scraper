@@ -105,6 +105,11 @@ class Config(BaseSettings):
         default="gpt-4o-mini",
         description="Fallback LLM model used when prompt budget is exceeded"
     )
+    # Gemini / Google GenAI API key (optional - can be set in .env as GEMINI_API_KEY)
+    gemini_api_key: Optional[str] = Field(
+        default=None,
+        description="Google Gemini / GenAI API key (optional)"
+    )
     llm_max_completion_tokens: int = Field(
         default=16384,
         description="Maximum tokens to request for completions"
