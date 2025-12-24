@@ -9,6 +9,7 @@ from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from contextlib import asynccontextmanager
 import logging
+import httpx
 
 from server.config import get_config
 from server.models import ChatRequest, ChatResponse
@@ -233,6 +234,12 @@ async def chat(
             model=model_used
         )
 
+    except httpx.ConnectError as e:
+        logger.warning("Connection error to upstream service (Supabase/OpenAI): %s", e)
+        raise HTTPException(
+            status_code=503,
+            detail="Service temporarily unavailable. Unable to connect to database or AI service. Please try again later."
+        )
     except HTTPException:
         raise
     except Exception as e:
