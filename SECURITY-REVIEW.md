@@ -22,12 +22,114 @@ This document covers security findings. Integrity and availability findings that
 
 ## Summary
 
+*Vastgesteld op revisie `49352fe`, vóór de MCP-MVP-implementatie.*
+
 | Severity | Count |
 |---|---|
 | 🔴 CRITICAL | 2 |
 | 🟠 HIGH | 6 |
 | 🟡 MEDIUM | 8 |
 | ⚪ LOW | 4 |
+
+## Status na de MCP-MVP-implementatie
+
+*Bijgewerkt op 13 oktober 2026. De bevindingen hierboven zijn niet herzien; deze
+sectie beschrijft wat er sindsdien is veranderd, wat er bewust is uitgesteld, en welke
+risico's zijn toegevoegd of verdwenen.*
+
+De MCP-MVP voegt een nieuwe package (`pinescript_mcp/`), een migratie
+(`0002_match_documents_v2.sql`) en één additieve functie in `server/supabase_client.py`
+toe. Het MCP-pad is **read-only retrieval en doet geen LLM-generatie**: er is
+geverifieerd dat `pinescript_mcp/` `llm_client` of `create_chat_completion` nergens
+aanroept. Daarmee verschilt het risicoprofiel wezenlijk van `/chat`, dat wél LLM-kosten
+en prompt-injectieoppervlak heeft.
+
+### Opgelost
+
+**Geen enkele bevinding uit deze review is volledig opgelost.** Eén bevinding is
+gedeeltelijk opgelost.
+
+| Bevinding | Status | Wat er is gedaan | Wat resteert |
+|---|---|---|---|
+| SEC-19 Dependency hygiene | ⚠️ **deels opgelost** | `requirements-mcp.txt` declareert de door de SDK verhoogde floors expliciet (`pydantic>=2.12`, `anyio>=4.9`, `typing-extensions>=4.13`) naast `mcp[cli]>=2.3,<3`. Zonder die verhoging faalt de resolver, omdat `requirements.txt` `pydantic>=2.10` pint. De MCP- en serverdependencies zijn nu gescheiden | Nog geen lockbestand; `requirements.txt` is niet gesplitst; de gedeprecieerde `asyncio`-backport staat er nog; `max_tokens` in plaats van `max_completion_tokens` |
+
+De nieuwe code introduceert geen nieuwe secrets: de configuratie komt volledig uit de
+omgeving en in de nieuwe bestanden zijn geen key-achtige patronen aangetroffen
+(`sk-…`, `eyJ…`, PEM-headers) — geverifieerd met een scan over alle nieuwe en
+gewijzigde bestanden.
+
+### Openstaand
+
+Alle overige bevindingen zijn ongewijzigd van kracht. De MCP-MVP raakt ze niet, met één
+uitzondering: SEC-01 wordt nu ook relevant voor het nieuwe databaseobject (zie
+[Nieuwe risico's](#nieuwe-risicos)).
+
+| Bevinding | Severity | Status na deze ronde |
+|---|---|---|
+| SEC-01 RLS niet aangezet | 🔴 CRITICAL | **Nog open — expliciet uitgesteld.** Zie [Uitgesteld](#uitgesteld) |
+| SEC-02 Login zonder wachtwoord | 🔴 CRITICAL | Ongewijzigd open |
+| SEC-03 CORS met wildcard en credentials | 🟠 HIGH | Ongewijzigd open |
+| SEC-04 `/status` ongeauthenticeerd | 🟠 HIGH | Ongewijzigd open |
+| SEC-05 Access- en refresh-tokens uitwisselbaar | 🟠 HIGH | Ongewijzigd open |
+| SEC-06 Destructieve admin-operatie | 🟠 HIGH | Ongewijzigd open |
+| SEC-07 Geen timeouts, retries op niet-herhaalbare fouten | 🟠 HIGH | Ongewijzigd open. De nieuwe `search_documents_v2` herhaalt een ontbrekende functie **niet** (direct falen), maar heeft net als de rest geen clienttimeout |
+| SEC-08 Interne foutdetails naar de client | 🟠 HIGH | Ongewijzigd open voor `/chat`. Het MCP-pad lekt **niet**: `tools._fail()` logt de volledige exceptie en geeft het model een korte melding zonder de ruwe upstreamtekst, met een aparte actionable melding bij ontbrekende configuratie of migratie. Daar zijn tests voor |
+| SEC-09 Tokenlevensduur genegeerd | 🟡 MEDIUM | Ongewijzigd open |
+| SEC-10 Admin-key vergelijking en lifecycle | 🟡 MEDIUM | Ongewijzigd open |
+| SEC-11 Geen kostenplafond | 🟡 MEDIUM | Ongewijzigd open voor `/chat`. Het MCP-pad genereert geen LLM-output, dus de kosten per aanroep zijn één embedding (orde $0,00002) |
+| SEC-12 Eén autorisatielaag | 🟡 MEDIUM | Ongewijzigd open |
+| SEC-13 Rollen in gesprekshistoriek niet gevalideerd | 🟡 MEDIUM | Ongewijzigd open. Het MCP-pad accepteert geen gesprekshistoriek, dus hier niet van toepassing |
+| SEC-14 Promptconstructie injectiegevoelig | 🟡 MEDIUM | Ongewijzigd open voor `/chat`. Het MCP-pad bouwt geen prompt |
+| SEC-15 Rate limiting niet handhaafbaar | 🟡 MEDIUM | Ongewijzigd open. Zie ook SEC-21 |
+| SEC-16 Onbereikbare dubbele exception handler | 🟡 MEDIUM | Ongewijzigd open |
+| SEC-17 JWKS in async-paden | ⚪ LOW | Ongewijzigd open |
+| SEC-18 Containerhardening en healthcheck | ⚪ LOW | Ongewijzigd open |
+| SEC-20 Buildlogs in de repository | ⚪ LOW | Ongewijzigd open |
+
+### Uitgesteld
+
+Deze bevindingen zijn **niet opgelost**; er is een beslissing vastgelegd om ze niet in
+deze ronde op te pakken. Ze blijven op de lijst staan.
+
+| Bevinding | Waarom uitgesteld | Gevolg |
+|---|---|---|
+| **SEC-01 — RLS nog open** | Bewust naar een eigen taak geschoven: het aanzetten van RLS plus policies raakt de hele Supabase-configuratie en de bestaande `/chat`-route, niet alleen de MCP-laag. Een halfslachtige RLS-wijziging kan de werkende applicatie breken | De hele index blijft leesbaar én beschrijfbaar voor iedereen met de publieke anon-key, en `match_documents` blijft publiek aanroepbaar. **Dit is nog steeds een deployment-blocker** |
+| SEC-06 — destructieve admin-operatie | Buiten de MCP-scope; de MCP-MVP voegt geen admin-endpoints toe | `/internal/index?full=true` kan nog steeds de index wissen zonder bevestiging of audit |
+| SEC-11, SEC-12, SEC-13, SEC-14 — LLM- en autorisatiegerelateerd | Betreffen het `/chat`-oppervlak, dat deze ronde niet wijzigt | Onveranderd; horen bij de API-hardening, niet bij de MCP-laag |
+| SEC-18, SEC-20 — container en repositoryhygiëne | Vragen een opruimronde die de open merge veronderstelt | Onveranderd. De nieuwe bestanden maken dit niet erger, maar ook niet beter |
+
+### Nieuwe risico's
+
+| # | Severity | Bevinding | Toelichting |
+|---|---|---|---|
+| SEC-21 | 🟡 MEDIUM lokaal / 🟠 HIGH remote | De MCP-tools hebben geen authenticatie en geen rate limiting | `/chat` vereist een JWT en is gelimiteerd op 10/minuut; de MCP-tools hebben geen van beide. Over **stdio** is dat geen blootstelling — het is een lokale pipe die de client zelf start, en er is geen netwerk-oppervlak. Blootgesteld via Streamable HTTP is het een ongeauthenticeerde leesroute over de volledige documentatie-index. Verzachtende omstandigheid: er wordt geen LLM-output gegenereerd, dus het risico is datablootstelling en misbruik, niet kosten. [docs/MCP.md](./docs/MCP.md) adviseert daarom expliciet om met stdio te beginnen en authenticatie toe te voegen vóór een remote deployment |
+| — | 🟡 MEDIUM (beschikbaarheid, niet veiligheid) | Uitrolkoppeling aan migratie 0002 | De code delegeert de filtering aan `match_documents_v2`. Tegen een database zonder 0002 mislukken **alle drie** de tools met een `MigrationRequiredError`. Dit is de eerste wijziging in dit project waarbij code en schema samen uitgerold moeten worden; verkeerde volgorde betekent volledige uitval van de MCP-tools, niet een degradeerde functie. De fout is wel expliciet en actionable |
+| — | ⚪ LOW (hygiëne, geen kwetsbaarheid) | ~~`pglast` staat in de virtuele omgeving maar is niet gedeclareerd~~ **opgelost** | Geïnstalleerd voor statische SQL-validatie. Het was niet gedeclareerd, wat een reproduceerbaarheidsprobleem is: het gedocumenteerde "66 passed" was daardoor niet reproduceerbaar. Nu vastgelegd in `requirements-dev.txt` als optionele ontwikkeldependency; zonder het pakket skipt de parsertest en is het resultaat 65 passed, 1 skipped, 0 failed |
+
+Eén nieuw oppervlak is juist **voorkomen**: PostgreSQL geeft nieuwe functies standaard
+`EXECUTE` aan `PUBLIC`, wat in Supabase de `anon`-rol is. Zonder tegenmaatregel zou
+`match_documents_v2` een tweede publiek aanroepbare vectorsearch zijn geweest — precies
+de fout die SEC-01 al beschrijft. Migratie 0002 bevat daarom expliciet
+`REVOKE EXECUTE ... FROM PUBLIC` en `GRANT EXECUTE ... TO service_role`. Omdat de
+applicatie met `SUPABASE_SERVICE_ROLE_KEY` werkt, kost dit geen functionaliteit.
+
+### Verdwenen risico's
+
+| Risico | Status | Onderbouwing |
+|---|---|---|
+| Amplificatie via over-fetch (4× het gevraagde aantal rijen per zoekopdracht) | ✅ verdwenen | Gemeten: 32 → 8 rijen bij `top_k = 8`, en 92,9% minder bytes per query. De client vraagt exact `top_k` gefilterde rijen. Dit was geen securitybevinding, maar het verkleint zowel de belasting als de omvang van een eventuele datalek |
+| De embedding-vector in elke response | ✅ verdwenen | `match_documents_v2` retourneert de `embedding`-kolom niet meer; die was 71,5% van de bytes per rij en werd door niemand gelezen |
+| Een nieuw publiek aanroepbare RPC-functie | ✅ voorkomen | Zie hierboven: expliciete `REVOKE`/`GRANT` in 0002 |
+| Een nieuwe test die stil naar buiten belt met een placeholder-key | ✅ verdwenen | De autouse guard `block_outbound_calls` laat elke niet-gestubde outbound call hard falen. Zie bug (d) in [implementatieplan_mcp.md](./implementatieplan_mcp.md#d-outbound-openai-call-bug) |
+| Secrets in de nieuwe bestanden | ✅ niet aanwezig | Geverifieerd met een scan over alle nieuwe en gewijzigde bestanden |
+
+### Gewijzigde aanbevelingsorde
+
+De volgorde hieronder in
+[Recommended remediation order](#recommended-remediation-order) blijft grotendeels
+staan, met één toevoeging: vóór of samen met punt 1 moet **migratie 0002 op een
+testproject worden uitgevoerd**, omdat de nieuwe code anders niet werkt. Zie P1 in
+[implementatieplan_mcp.md](./implementatieplan_mcp.md#aanbevolen-vervolgstappen).
 
 ## Findings
 

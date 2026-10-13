@@ -1,0 +1,24 @@
+# MCP server dependencies (read-only MVP).
+#
+# Install:  python -m pip install -r requirements-mcp.txt
+#
+# The MCP server reuses the existing RAG modules in server/, so the server
+# dependencies are still required. Keep this file additive: installing it must
+# never downgrade anything that server/ relies on.
+
+# Official Model Context Protocol Python SDK.
+# v2 API: "from mcp.server import MCPServer" (FastMCP was renamed in v2).
+# The "cli" extra provides the `mcp` command (mcp dev / mcp run / mcp install).
+mcp[cli]>=2.3,<3
+
+# Floors raised by the SDK. These must be >= the SDK's own minimums or pip
+# fails to resolve; requirements.txt under-pins pydantic, so it is repeated here.
+pydantic>=2.12
+anyio>=4.9
+typing-extensions>=4.13
+
+# Shared with the FastAPI server (see requirements.txt).
+openai>=1.3.0
+supabase>=2.0.0
+tiktoken>=0.5.0
+python-dotenv>=1.0

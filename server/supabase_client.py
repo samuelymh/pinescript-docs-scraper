@@ -356,3 +356,126 @@ def clear_all_data() -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Failed to clear data: {e}")
         raise
+
+
+class MigrationRequiredError(RuntimeError):
+    """The database is missing a migration this client depends on.
+
+    Raised instead of a generic RPC failure so that callers can surface an
+    actionable message rather than "the search failed".
+    """
+
+
+def _is_missing_function_error(error: Exception) -> bool:
+    """Detect PostgREST's "function not found" response (PGRST202 / HTTP 404)."""
+    text = str(error).lower()
+    return (
+        "pgrst202" in text
+        or "could not find the function" in text
+        or ("function" in text and "does not exist" in text)
+    )
+
+
+def search_documents_v2(
+    query_embedding: List[float],
+    limit: int = 12,
+    similarity_threshold: float = -1.0,
+    source_filename: Optional[str] = None,
+    code_only: bool = False
+) -> List[Dict[str, Any]]:
+    """Search documents through the filtered `match_documents_v2` RPC.
+
+    Filtering - similarity floor, source substring and code-only - happens inside
+    PostgreSQL, so the RPC returns at most `limit` rows that already satisfy every
+    criterion and the caller does not discard anything. Compare
+    `search_similar_documents`, which calls the unfiltered v1 RPC and leaves
+    filtering to the caller.
+
+    Requires `migrations/0002_match_documents_v2.sql`. Against a database without
+    it, this raises `MigrationRequiredError`.
+
+    Args:
+        query_embedding: Query embedding vector (1536 dimensions)
+        limit: Maximum number of rows to return
+        similarity_threshold: Minimum cosine similarity in [-1, 1]. The default of
+            -1.0 is the bottom of the cosine range and applies no floor. Note this
+            is a *similarity*, not a distance: higher is better. (v1's identically
+            named argument was a distance, and was ignored by the function body.)
+        source_filename: Case-insensitive literal substring of `source_filename`
+        code_only: When True, only rows whose `code_snippet` flag is set
+
+    Returns:
+        List of document rows with a `similarity` score. Unlike v1, the result
+        does not include the `embedding` column.
+
+    Raises:
+        MigrationRequiredError: If `match_documents_v2` is not installed
+        Exception: If the RPC fails after retries
+    """
+    client = init_supabase_client()
+
+    payload: Dict[str, Any] = {
+        "query_embedding": query_embedding,
+        "match_threshold": float(similarity_threshold),
+        "match_count": int(limit),
+        "filter_source": source_filename,
+        "filter_code_only": bool(code_only),
+    }
+
+    # Retry loop mirroring `search_similar_documents`, kept local on purpose: the
+    # existing function's body is not exercised by the test suite (the tests
+    # monkeypatch it), so extracting a shared helper would refactor an unverified
+    # code path for no behavioural gain.
+    max_attempts = 3
+    result = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # Payload size is logged to help debug intermittent errors
+            try:
+                payload_size = len(json.dumps(payload))
+            except Exception:
+                payload_size = None
+
+            logger.info(
+                "match_documents_v2 (attempt %d/%d, payload_bytes=%s, threshold=%s, "
+                "source=%r, code_only=%s, limit=%s)",
+                attempt,
+                max_attempts,
+                payload_size,
+                similarity_threshold,
+                source_filename,
+                code_only,
+                limit,
+            )
+
+            result = client.rpc("match_documents_v2", payload).execute()
+            break
+        except Exception as e:
+            if _is_missing_function_error(e):
+                logger.error(
+                    "match_documents_v2 is not installed; apply "
+                    "migrations/0002_match_documents_v2.sql"
+                )
+                raise MigrationRequiredError(
+                    "match_documents_v2 is not installed. Apply "
+                    "migrations/0002_match_documents_v2.sql to the Supabase project."
+                ) from e
+
+            logger.warning(
+                "match_documents_v2 attempt %d failed: %s", attempt, e, exc_info=False
+            )
+            if attempt < max_attempts:
+                time.sleep(attempt)
+            else:
+                logger.error("match_documents_v2 failed after %d attempts", max_attempts)
+                raise
+
+    documents = result.data if result and result.data else []
+    logger.info(
+        "match_documents_v2 returned %d rows (limit=%d, code_only=%s)",
+        len(documents),
+        limit,
+        code_only,
+    )
+    return documents
+

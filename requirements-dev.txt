@@ -1,0 +1,6 @@
+# Development and verification dependencies.
+
+# Optional SQL syntax validation for migration tests.
+# Without this package the parser validation test is skipped.
+
+pglast>=8.5
